@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+
+    <!--
+      viewport-fit=cover puts the canvas under the notch on a phone rather than letterboxing it
+      between the safe-area insets. user-scalable=no is belt-and-braces: iOS Safari ignores it, but
+      touch-action:none on the canvas stops the double-tap zoom it would otherwise allow.
+    -->
+    <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+
+    <!-- Added to the home screen, these give a real fullscreen launch. On iPhone that is the only
+         way to get one: Safari does not implement Element.requestFullscreen. -->
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#2b3440">
+
+    <title>SurferCopy</title>
+
+    <style>
+      /* Matches GameBootstrap's sky colour, so the page, the letterbox and the cleared frame are
+         all the same colour and the load does not flash. */
+      :root { --sky: #2b3440; color-scheme: dark; }
+
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: var(--sky);
+        overflow: hidden;
+
+        /* Kills pull-to-refresh and the rubber-band bounce. Without it an upward swipe on Android
+           Chrome reloads the page instead of jumping. */
+        overscroll-behavior: none;
+      }
+
+      body {
+        position: fixed;
+        inset: 0;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-touch-callout: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      /* Sized in pixels from JS rather than left to 100vh: on mobile Safari the viewport units
+         include the URL bar, so a 100vh canvas is taller than the screen and the bottom of the
+         game sits under the browser chrome. */
+      #stage {
+        position: fixed;
+        left: 0;
+        top: 0;
+        overflow: hidden;
+      }
+
+      #unity-canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: var(--sky);
+        outline: none;
+
+        /* The single most important line in this file. Without it the browser claims every
+           vertical drag for scrolling and the swipe never reaches Unity, so jump and roll do
+           nothing on a phone. */
+        touch-action: none;
+      }
+
+      #loader {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 18px;
+        color: #c8d0dc;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        font-size: 13px;
+      }
+
+      #bar {
+        width: min(62vw, 280px);
+        height: 4px;
+        border-radius: 2px;
+        background: rgba(255, 255, 255, 0.12);
+        overflow: hidden;
+      }
+
+      #bar-fill {
+        width: 0%;
+        height: 100%;
+        border-radius: 2px;
+        background: #f5c93f;
+        transition: width 0.12s linear;
+      }
+
+      #error {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        display: none;
+        padding: 12px 16px;
+        background: #8c2230;
+        color: #fff;
+        font-size: 13px;
+        line-height: 1.4;
+        white-space: pre-wrap;
+      }
+
+      /* Shown only where the Fullscreen API actually exists, which excludes iPhone Safari - a
+         button that silently does nothing is worse than no button. Sits in the corner opposite
+         the HUD score, and takes manipulation rather than none so the tap is not swallowed. */
+      #fullscreen {
+        position: absolute;
+        right: max(10px, env(safe-area-inset-right));
+        bottom: max(10px, env(safe-area-inset-bottom));
+        width: 42px;
+        height: 42px;
+        border: 0;
+        border-radius: 10px;
+        background: rgba(20, 26, 34, 0.55);
+        color: #dfe6ef;
+        font-size: 19px;
+        line-height: 1;
+        cursor: pointer;
+        touch-action: manipulation;
+      }
+
+      #fullscreen[hidden] { display: none; }
+    </style>
+  </head>
+
+  <body>
+    <div id="stage">
+      <canvas id="unity-canvas" width="1280" height="720" tabindex="-1"></canvas>
+
+      <div id="loader">
+        <div>SurferCopy</div>
+        <div id="bar"><div id="bar-fill"></div></div>
+      </div>
+
+      <div id="error"></div>
+      <button id="fullscreen" type="button" aria-label="Toggle fullscreen" hidden>&#9974;</button>
+    </div>
+
+    <script>
+      var canvas = document.querySelector("#unity-canvas");
+      var stage = document.querySelector("#stage");
+      var loader = document.querySelector("#loader");
+      var barFill = document.querySelector("#bar-fill");
+      var errorBox = document.querySelector("#error");
+      var fullscreenButton = document.querySelector("#fullscreen");
+
+      var isTouch = window.matchMedia("(pointer: coarse)").matches || "ontouchstart" in window;
+
+      // The page is the viewport, measured in real pixels every time it changes. orientationchange
+      // fires before the new size is readable on iOS, hence the deferred second pass; visualViewport
+      // is what actually moves when the URL bar slides away mid-run.
+      function resize() {
+        stage.style.width = window.innerWidth + "px";
+        stage.style.height = window.innerHeight + "px";
+      }
+
+      window.addEventListener("resize", resize);
+      window.addEventListener("orientationchange", function () { setTimeout(resize, 250); });
+      if (window.visualViewport) window.visualViewport.addEventListener("resize", resize);
+      resize();
+
+      // Long-press menus and pinch zoom are not gestures this game wants; touch-action covers the
+      // rest. gesturestart is WebKit-only and is what stops a two-finger pinch zooming the page.
+      canvas.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+      document.addEventListener("gesturestart", function (e) { e.preventDefault(); }, { passive: false });
+      document.addEventListener("touchmove", function (e) {
+        if (e.touches.length > 1) e.preventDefault();
+      }, { passive: false });
+
+      // Unity's loader greets every phone with "WebGL is not currently supported on mobiles". The
+      // build runs fine, it is the first thing a player sees, and there is no way to opt out of it
+      // except here. Matched narrowly on purpose: if the wording ever changes the banner comes back
+      // rather than being silently swallowed.
+      function showBanner(msg, type) {
+        if (type !== "error" && /not currently supported on mobile/i.test(msg)) return;
+
+        errorBox.textContent = msg;
+        errorBox.style.display = "block";
+
+        if (type !== "error") setTimeout(function () { errorBox.style.display = "none"; }, 5000);
+      }
+
+      var buildUrl = "Build";
+      var config = {
+        arguments: [],
+        dataUrl: buildUrl + "/WebGL.data.unityweb",
+        frameworkUrl: buildUrl + "/WebGL.framework.js.unityweb",
+        codeUrl: buildUrl + "/WebGL.wasm.unityweb",
+        streamingAssetsUrl: "StreamingAssets",
+        companyName: "DefaultCompany",
+        productName: "SurferCopy",
+        productVersion: "0.1.0",
+        showBanner: showBanner,
+
+        // Unity sizes the render target to the canvas's CSS box times this. A phone at its native
+        // ratio renders three times the pixels it shows, which this game cannot afford - it is
+        // fill-rate bound, not draw-call bound. Capped rather than pinned to 1 so a high-density
+        // screen still gets a sharper image than a low-density one.
+        devicePixelRatio: Math.min(window.devicePixelRatio || 1, isTouch ? 1.5 : 2)
+      };
+
+      var script = document.createElement("script");
+      script.src = buildUrl + "/WebGL.loader.js";
+
+      script.onload = function () {
+        createUnityInstance(canvas, config, function (progress) {
+          barFill.style.width = (100 * progress) + "%";
+        }).then(function (unityInstance) {
+          loader.style.display = "none";
+
+          // Hidden on iPhone, where document.fullscreenEnabled is false because Safari has no
+          // Fullscreen API for non-video elements. Add to Home Screen is the route there.
+          if (isTouch && (document.fullscreenEnabled || document.webkitFullscreenEnabled)) {
+            fullscreenButton.hidden = false;
+            fullscreenButton.addEventListener("click", function () {
+              unityInstance.SetFullscreen(1);
+              fullscreenButton.hidden = true;
+            });
+
+            document.addEventListener("fullscreenchange", function () {
+              if (!document.fullscreenElement) fullscreenButton.hidden = false;
+            });
+          }
+        }).catch(function (message) {
+          showBanner(message, "error");
+        });
+      };
+
+      document.body.appendChild(script);
+    </script>
+  </body>
+</html>
