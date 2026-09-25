@@ -198,13 +198,16 @@
       var buildUrl = "Build";
       var config = {
         arguments: [],
+        // Trash Dash saves with FileStream to persistentDataPath, which on the web is IndexedDB and
+        // is not flushed on its own; without this the save is gone on the next page load.
+        autoSyncPersistentDataPath: true,
         dataUrl: buildUrl + "/WebGL.data.unityweb",
         frameworkUrl: buildUrl + "/WebGL.framework.js.unityweb",
         codeUrl: buildUrl + "/WebGL.wasm.unityweb",
         streamingAssetsUrl: "StreamingAssets",
         companyName: "DefaultCompany",
         productName: "SurferCopy",
-        productVersion: "0.1.0",
+        productVersion: "1.0",
         showBanner: showBanner,
 
         // Unity sizes the render target to the canvas's CSS box times this. A phone at its native
